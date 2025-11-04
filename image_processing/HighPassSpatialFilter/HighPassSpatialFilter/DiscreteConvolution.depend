@@ -1,0 +1,8 @@
+# depslib dependency file v1.0
+1549644606 source:c:\users\israel\documents\c-imageprocesing\highpassspatialfilter\main.c
+	<stdio.h>
+	<stdlib.h>
+	"mask.h"
+
+1549421827 c:\users\israel\documents\c-imageprocesing\highpassspatialfilter\mask.h
+
