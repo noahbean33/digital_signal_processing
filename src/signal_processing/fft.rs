@@ -250,6 +250,88 @@ pub fn phase_spectrum(fft_result: &[Complex]) -> Vec<f64> {
     fft_result.iter().map(Complex::arg).collect()
 }
 
+// ─── Direct O(N²) DFT/IDFT for arbitrary-length signals ─────────────────────
+
+/// Direct DFT of a real-valued signal (O(N²), works on any length).
+///
+/// Returns N/2 complex frequency bins (DC to Nyquist).
+#[must_use]
+pub fn dft_real(signal: &[f64]) -> Vec<Complex> {
+    let n = signal.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let n_out = n / 2;
+    let mut output = vec![Complex::zero(); n_out];
+    for k in 0..n_out {
+        for (i, &x) in signal.iter().enumerate() {
+            let angle = 2.0 * PI * k as f64 * i as f64 / n as f64;
+            output[k].re += x * angle.cos();
+            output[k].im -= x * angle.sin();
+        }
+    }
+    output
+}
+
+/// Direct DFT of a complex-valued signal (O(N²), works on any length).
+#[must_use]
+pub fn dft_complex(input: &[Complex]) -> Vec<Complex> {
+    let n = input.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut output = vec![Complex::zero(); n];
+    for k in 0..n {
+        for (i, &x) in input.iter().enumerate() {
+            let angle = 2.0 * PI * k as f64 * i as f64 / n as f64;
+            let twiddle = Complex::new(angle.cos(), -angle.sin());
+            output[k] += x * twiddle;
+        }
+    }
+    output
+}
+
+/// Direct inverse DFT producing a real-valued output (O(N²)).
+///
+/// `input` contains N/2 frequency bins; output length = 2 × input length.
+#[must_use]
+pub fn idft_real(input: &[Complex]) -> Vec<f64> {
+    let n_in = input.len();
+    if n_in == 0 {
+        return Vec::new();
+    }
+    let n = n_in * 2;
+    let mut output = vec![0.0; n];
+    for i in 0..n {
+        for (k, &bin) in input.iter().enumerate() {
+            let angle = 2.0 * PI * k as f64 * i as f64 / n as f64;
+            output[i] += bin.re * angle.cos() - bin.im * angle.sin();
+        }
+        output[i] /= n as f64;
+    }
+    output
+}
+
+/// Direct inverse DFT producing a complex-valued output (O(N²)).
+#[must_use]
+pub fn idft_complex(input: &[Complex]) -> Vec<Complex> {
+    let n = input.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut output = vec![Complex::zero(); n];
+    for i in 0..n {
+        for (k, &bin) in input.iter().enumerate() {
+            let angle = 2.0 * PI * k as f64 * i as f64 / n as f64;
+            let twiddle = Complex::new(angle.cos(), angle.sin());
+            output[i] += bin * twiddle;
+        }
+        output[i].re /= n as f64;
+        output[i].im /= n as f64;
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +375,37 @@ mod tests {
         let w = twiddle_factor(0, 8);
         assert!((w.re - 1.0).abs() < 1e-10);
         assert!(w.im.abs() < 1e-10);
+    }
+
+    #[test]
+    fn dft_real_dc_signal() {
+        let signal = vec![1.0; 10];
+        let result = dft_real(&signal);
+        assert_eq!(result.len(), 5);
+        assert!((result[0].re - 10.0).abs() < 1e-6);
+        for c in &result[1..] {
+            assert!(c.norm() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn dft_complex_roundtrip() {
+        let input: Vec<Complex> = (0..7)
+            .map(|i| Complex::new(i as f64, 0.0))
+            .collect();
+        let freq = dft_complex(&input);
+        let recovered = idft_complex(&freq);
+        for (a, b) in input.iter().zip(recovered.iter()) {
+            assert!((a.re - b.re).abs() < 1e-6);
+            assert!((a.im - b.im).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn dft_real_arbitrary_length() {
+        // Verify DFT works on non-power-of-2 length
+        let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let result = dft_real(&signal);
+        assert_eq!(result.len(), 3);
     }
 }

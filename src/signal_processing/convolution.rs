@@ -127,6 +127,31 @@ pub fn block_convolution(block: &[f64], impulse_response: &[f64]) -> Vec<f64> {
     convolve(block, impulse_response)
 }
 
+/// Autocorrelation: cross-correlation of a signal with itself.
+///
+/// Output length = `2 * signal.len() - 1`.
+#[must_use]
+pub fn autocorrelate(signal: &[f64]) -> Vec<f64> {
+    cross_correlate(signal, signal)
+}
+
+/// Running sum (cumulative integration).
+///
+/// `y[n] = Σ_{k=0}^{n} x[k]`
+#[must_use]
+pub fn running_sum(signal: &[f64]) -> Vec<f64> {
+    if signal.is_empty() {
+        return Vec::new();
+    }
+    let mut output = Vec::with_capacity(signal.len());
+    let mut sum = 0.0;
+    for &x in signal {
+        sum += x;
+        output.push(sum);
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +184,29 @@ mod tests {
         let s = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let ncc = normalized_cross_correlation(&s, &s);
         assert!((ncc - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn autocorrelate_peak_at_centre() {
+        let s = vec![1.0, 2.0, 3.0, 2.0, 1.0];
+        let ac = autocorrelate(&s);
+        assert_eq!(ac.len(), 9);
+        // Peak is at the centre (lag 0)
+        let centre = ac.len() / 2;
+        for (i, &v) in ac.iter().enumerate() {
+            assert!(v <= ac[centre] + 1e-10, "lag {i} exceeded centre");
+        }
+    }
+
+    #[test]
+    fn running_sum_correct() {
+        let s = vec![1.0, 2.0, 3.0, 4.0];
+        let rs = running_sum(&s);
+        assert_eq!(rs, vec![1.0, 3.0, 6.0, 10.0]);
+    }
+
+    #[test]
+    fn running_sum_empty() {
+        assert!(running_sum(&[]).is_empty());
     }
 }
