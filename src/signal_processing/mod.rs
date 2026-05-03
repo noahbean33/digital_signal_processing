@@ -17,4 +17,5 @@ pub mod spectral;
 pub mod stats;
 pub mod stft;
 pub mod wavelets;
+pub mod weighting;
 pub mod windowing;

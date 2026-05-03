@@ -100,6 +100,44 @@ pub fn crest_factor(signal: &[f64]) -> f64 {
     peak / r
 }
 
+// ─── dB Conversion Utilities ──────────────────────────────────────────────────
+
+/// Convert an amplitude (voltage) value to decibels: 20 * log10(|amp|).
+///
+/// Returns `f64::NEG_INFINITY` for zero amplitude.
+#[must_use]
+pub fn amp_to_db(amp: f64) -> f64 {
+    let abs_amp = amp.abs();
+    if abs_amp < 1e-30 {
+        return f64::NEG_INFINITY;
+    }
+    20.0 * abs_amp.log10()
+}
+
+/// Convert a decibel value to amplitude (voltage): 10^(dB / 20).
+#[must_use]
+pub fn db_to_amp(db: f64) -> f64 {
+    10.0_f64.powf(db / 20.0)
+}
+
+/// Convert a power value to decibels: 10 * log10(|power|).
+///
+/// Returns `f64::NEG_INFINITY` for zero power.
+#[must_use]
+pub fn power_to_db(power: f64) -> f64 {
+    let abs_power = power.abs();
+    if abs_power < 1e-30 {
+        return f64::NEG_INFINITY;
+    }
+    10.0 * abs_power.log10()
+}
+
+/// Convert a decibel value to power: 10^(dB / 10).
+#[must_use]
+pub fn db_to_power(db: f64) -> f64 {
+    10.0_f64.powf(db / 10.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +200,38 @@ mod tests {
     fn peak_to_peak_range() {
         let sig = vec![-2.0, 0.0, 3.0];
         assert!((peak_to_peak(&sig) - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn amp_db_roundtrip() {
+        let amp = 2.5;
+        let db = amp_to_db(amp);
+        let recovered = db_to_amp(db);
+        assert!((recovered - amp).abs() < 1e-10);
+    }
+
+    #[test]
+    fn power_db_roundtrip() {
+        let pwr = 100.0;
+        let db = power_to_db(pwr);
+        assert!((db - 20.0).abs() < 1e-10); // 10*log10(100) = 20
+        let recovered = db_to_power(db);
+        assert!((recovered - pwr).abs() < 1e-6);
+    }
+
+    #[test]
+    fn amp_to_db_unity_is_zero() {
+        assert!(amp_to_db(1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn amp_to_db_zero_is_neg_inf() {
+        assert!(amp_to_db(0.0).is_infinite());
+        assert!(amp_to_db(0.0) < 0.0);
+    }
+
+    #[test]
+    fn db_to_amp_zero_is_one() {
+        assert!((db_to_amp(0.0) - 1.0).abs() < 1e-10);
     }
 }

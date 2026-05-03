@@ -332,6 +332,52 @@ pub fn idft_complex(input: &[Complex]) -> Vec<Complex> {
     output
 }
 
+// ─── Goertzel Algorithm ──────────────────────────────────────────────────────
+
+/// Compute a single DFT bin using the Goertzel algorithm.
+///
+/// Efficiently evaluates X[k] for one frequency bin `k` in O(N) time without
+/// computing the full FFT. Useful for DTMF detection, single-tone measurement,
+/// or any scenario where only a few frequency bins are needed.
+///
+/// `signal` – input samples.
+/// `k` – the DFT bin index (0 ≤ k < N).
+///
+/// Returns the complex DFT value X[k].
+#[must_use]
+pub fn goertzel(signal: &[f64], k: usize) -> Complex {
+    let n = signal.len();
+    if n == 0 {
+        return Complex::zero();
+    }
+    let omega = 2.0 * PI * k as f64 / n as f64;
+    let coeff = 2.0 * omega.cos();
+    let mut q1 = 0.0;
+    let mut q2 = 0.0;
+    for &x in signal {
+        let q0 = coeff * q1 - q2 + x;
+        q2 = q1;
+        q1 = q0;
+    }
+    Complex::new(q1 * omega.cos() - q2, q1 * omega.sin())
+}
+
+/// Compute the magnitude of a single DFT bin using the Goertzel algorithm.
+///
+/// Returns |X[k]| without forming the full complex result.
+#[must_use]
+pub fn goertzel_magnitude(signal: &[f64], k: usize) -> f64 {
+    goertzel(signal, k).norm()
+}
+
+/// Compute the power of a single DFT bin using the Goertzel algorithm.
+///
+/// Returns |X[k]|² without forming the full complex result.
+#[must_use]
+pub fn goertzel_power(signal: &[f64], k: usize) -> f64 {
+    goertzel(signal, k).norm_sqr()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +453,40 @@ mod tests {
         let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
         let result = dft_real(&signal);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn goertzel_dc_bin() {
+        let signal = vec![1.0; 8];
+        let result = goertzel(&signal, 0);
+        assert!((result.re - 8.0).abs() < 1e-10);
+        assert!(result.im.abs() < 1e-10);
+    }
+
+    #[test]
+    fn goertzel_matches_dft() {
+        let signal: Vec<f64> = (0..16)
+            .map(|i| (2.0 * PI * 3.0 * i as f64 / 16.0).sin())
+            .collect();
+        let mut complex_signal = real_to_complex(&signal);
+        let mut fft_result = complex_signal.clone();
+        fft(&mut fft_result);
+        for k in 0..16 {
+            let g = goertzel(&signal, k);
+            assert!((g.re - fft_result[k].re).abs() < 1e-6);
+            assert!((g.im - fft_result[k].im).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn goertzel_magnitude_single_tone() {
+        let n = 64;
+        let signal: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 5.0 * i as f64 / n as f64).sin())
+            .collect();
+        let mag_at_5 = goertzel_magnitude(&signal, 5);
+        let mag_at_10 = goertzel_magnitude(&signal, 10);
+        assert!(mag_at_5 > 20.0);
+        assert!(mag_at_10 < 1e-6);
     }
 }

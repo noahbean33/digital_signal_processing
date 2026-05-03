@@ -96,6 +96,66 @@ pub fn generate_chirp(
         .collect()
 }
 
+/// Generate a square wave signal.
+///
+/// `x[n] = amplitude * sign(sin(2π * frequency * n / sample_rate + phase))`
+#[must_use]
+pub fn generate_square(
+    length: usize,
+    amplitude: f64,
+    frequency: f64,
+    sample_rate: f64,
+    phase: f64,
+) -> Vec<f64> {
+    (0..length)
+        .map(|n| {
+            let t = 2.0 * PI * frequency * n as f64 / sample_rate + phase;
+            let s = t.sin();
+            if s >= 0.0 { amplitude } else { -amplitude }
+        })
+        .collect()
+}
+
+/// Generate a sawtooth wave signal (ramp from -amplitude to +amplitude).
+///
+/// `x[n] = amplitude * (2 * fract(frequency * n / sample_rate + phase / 2π) - 1)`
+#[must_use]
+pub fn generate_sawtooth(
+    length: usize,
+    amplitude: f64,
+    frequency: f64,
+    sample_rate: f64,
+    phase: f64,
+) -> Vec<f64> {
+    (0..length)
+        .map(|n| {
+            let t = frequency * n as f64 / sample_rate + phase / (2.0 * PI);
+            let frac = t - t.floor();
+            amplitude * (2.0 * frac - 1.0)
+        })
+        .collect()
+}
+
+/// Generate a triangle wave signal (starts at +amplitude with zero phase).
+///
+/// `x[n] = amplitude * (4 * |fract(frequency * n / sample_rate + phase / 2π) - 0.5| - 1)`
+#[must_use]
+pub fn generate_triangle(
+    length: usize,
+    amplitude: f64,
+    frequency: f64,
+    sample_rate: f64,
+    phase: f64,
+) -> Vec<f64> {
+    (0..length)
+        .map(|n| {
+            let t = frequency * n as f64 / sample_rate + phase / (2.0 * PI);
+            let frac = t - t.floor();
+            amplitude * (4.0 * (frac - 0.5).abs() - 1.0)
+        })
+        .collect()
+}
+
 /// Normalise a signal to the range `[-1, 1]`.
 #[must_use]
 pub fn normalize(signal: &[f64]) -> Vec<f64> {
@@ -251,5 +311,36 @@ mod tests {
     fn chirp_correct_length() {
         let c = generate_chirp(200, 1.0, 100.0, 1000.0, 8000.0);
         assert_eq!(c.len(), 200);
+    }
+
+    #[test]
+    fn square_wave_values() {
+        let s = generate_square(100, 1.0, 10.0, 100.0, 0.0);
+        assert_eq!(s.len(), 100);
+        // All values should be +1 or -1
+        assert!(s.iter().all(|&v| (v.abs() - 1.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn sawtooth_range() {
+        let s = generate_sawtooth(1000, 1.0, 10.0, 1000.0, 0.0);
+        assert_eq!(s.len(), 1000);
+        // All values should be within [-1, 1]
+        assert!(s.iter().all(|&v| v >= -1.0 - 1e-10 && v <= 1.0 + 1e-10));
+    }
+
+    #[test]
+    fn triangle_range() {
+        let s = generate_triangle(1000, 1.0, 10.0, 1000.0, 0.0);
+        assert_eq!(s.len(), 1000);
+        // All values should be within [-1, 1]
+        assert!(s.iter().all(|&v| v >= -1.0 - 1e-10 && v <= 1.0 + 1e-10));
+    }
+
+    #[test]
+    fn triangle_starts_at_peak() {
+        // With default phase=0, triangle should start near +amplitude
+        let s = generate_triangle(100, 2.0, 10.0, 100.0, 0.0);
+        assert!((s[0] - 2.0).abs() < 0.3);
     }
 }
