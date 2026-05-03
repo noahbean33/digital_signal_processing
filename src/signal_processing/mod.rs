@@ -1,0 +1,17 @@
+pub mod adaptive;
+pub mod analysis;
+pub mod array_processing;
+pub mod convolution;
+pub mod emd;
+pub mod fft;
+pub mod fir;
+pub mod iir;
+pub mod modulation;
+pub mod nonlinear;
+pub mod quantization;
+pub mod resampling;
+pub mod robust;
+pub mod spectral;
+pub mod stft;
+pub mod wavelets;
+pub mod windowing;

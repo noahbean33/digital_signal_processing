@@ -13,7 +13,7 @@ Makefiles
 *.o
 *.map
 *.launch
-*.pdf
+#*.pdf
 *.rar
 
 # Ignore STM32CubeIDE metadata directories and files
