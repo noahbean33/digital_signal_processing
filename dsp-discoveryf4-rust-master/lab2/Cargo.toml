@@ -1,0 +1,44 @@
+[package]
+name = "lab2"
+version = "0.1.0"
+authors = ["Jacob Rosenthal <jacobrosenthal@gmail.com>"]
+edition = "2018"
+resolver = "2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+cortex-m = "0.7.2"
+cortex-m-rt = "0.6.12"
+stm32f4xx-hal = { version = "0.9.0", features = ["stm32f407", "rt"] }
+panic_break = { path = "../panic_break" }
+rtt-target = { version = "0.3.1", features = ["cortex-m"] }
+micromath = "1.0.1"
+heapless = { version = "0.7.0" }
+itertools = { version = "0.10.0", default-features = false }
+cty = "0.2.1"
+
+[dependencies.embedded-hal]
+features = ["unproven"]
+version = "0.2.5"
+
+# for cargo flash
+[package.metadata]
+chip = "STM32F407VGTx"
+
+[profile.dev]
+codegen-units = 1
+debug = 1
+debug-assertions = true # !
+incremental = false
+lto = "fat"
+opt-level = 'z' # !
+overflow-checks = false
+
+[profile.release]
+codegen-units = 1
+debug = 1
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = 3
+overflow-checks = false

@@ -1,0 +1,15 @@
+# cargo run --example whatever
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+
+# openocd
+#runner = "arm-none-eabi-gdb -x openocd.gdb"
+
+# probe-run
+runner = "probe-run --chip STM32F407VGTx"
+
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+]
+
+[build]
+target = "thumbv7em-none-eabihf"
