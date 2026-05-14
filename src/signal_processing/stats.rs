@@ -1227,6 +1227,185 @@ pub fn fano_factor(signal: &[f64]) -> f64 {
     variance(signal) / m.abs()
 }
 
+// ─── Mutual Information ──────────────────────────────────────────────────────
+
+/// Result of a mutual information computation.
+#[derive(Clone, Debug)]
+pub struct MutualInfoResult {
+    /// Mutual information in bits.
+    pub mi: f64,
+    /// Entropy of x in bits.
+    pub entropy_x: f64,
+    /// Entropy of y in bits.
+    pub entropy_y: f64,
+    /// Joint entropy of (x, y) in bits.
+    pub joint_entropy: f64,
+    /// Number of bins used for discretisation.
+    pub num_bins: usize,
+}
+
+/// Compute the mutual information between two equal-length vectors.
+///
+/// Uses histogram binning to estimate the probability distributions.
+/// If `num_bins` is 0, the number of bins is chosen automatically via the
+/// Freedman-Diaconis rule.
+///
+/// MI(X;Y) = H(X) + H(Y) − H(X,Y)
+#[must_use]
+pub fn mutual_information(x: &[f64], y: &[f64], num_bins: usize) -> MutualInfoResult {
+    let n = x.len();
+    assert_eq!(n, y.len(), "x and y must have equal length");
+    if n == 0 {
+        return MutualInfoResult {
+            mi: 0.0,
+            entropy_x: 0.0,
+            entropy_y: 0.0,
+            joint_entropy: 0.0,
+            num_bins: 0,
+        };
+    }
+
+    // Determine bins via Freedman-Diaconis if num_bins == 0
+    let bins = if num_bins == 0 {
+        let fd = |data: &[f64]| -> usize {
+            let mut sorted = data.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let q1 = sorted[sorted.len() / 4];
+            let q3 = sorted[3 * sorted.len() / 4];
+            let iqr = q3 - q1;
+            let range = sorted.last().unwrap() - sorted.first().unwrap();
+            if iqr.abs() < 1e-30 || range.abs() < 1e-30 {
+                return 10;
+            }
+            let bin_width = 2.0 * iqr * (n as f64).powf(-1.0 / 3.0);
+            (range / bin_width).ceil() as usize
+        };
+        let b1 = fd(x);
+        let b2 = fd(y);
+        ((b1 + b2) / 2).max(2)
+    } else {
+        num_bins
+    };
+
+    // Bin assignment helper
+    let bin_assign = |data: &[f64]| -> Vec<usize> {
+        let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max_val - min_val;
+        if range.abs() < 1e-30 {
+            return vec![0; data.len()];
+        }
+        data.iter()
+            .map(|&v| {
+                let b = ((v - min_val) / range * (bins as f64 - 1.0)).round() as usize;
+                b.min(bins - 1)
+            })
+            .collect()
+    };
+
+    let bins_x = bin_assign(x);
+    let bins_y = bin_assign(y);
+
+    // Marginal distributions
+    let mut px = vec![0.0; bins];
+    let mut py = vec![0.0; bins];
+    for i in 0..n {
+        px[bins_x[i]] += 1.0;
+        py[bins_y[i]] += 1.0;
+    }
+    let n_f = n as f64;
+    for v in px.iter_mut() {
+        *v /= n_f;
+    }
+    for v in py.iter_mut() {
+        *v /= n_f;
+    }
+
+    // Joint distribution
+    let mut pxy = vec![0.0; bins * bins];
+    for i in 0..n {
+        pxy[bins_x[i] * bins + bins_y[i]] += 1.0;
+    }
+    for v in pxy.iter_mut() {
+        *v /= n_f;
+    }
+
+    let eps = f64::EPSILON;
+    let entropy_x = -px
+        .iter()
+        .map(|&p| if p > eps { p * p.log2() } else { 0.0 })
+        .sum::<f64>();
+    let entropy_y = -py
+        .iter()
+        .map(|&p| if p > eps { p * p.log2() } else { 0.0 })
+        .sum::<f64>();
+    let joint_entropy = -pxy
+        .iter()
+        .map(|&p| if p > eps { p * p.log2() } else { 0.0 })
+        .sum::<f64>();
+
+    let mi = entropy_x + entropy_y - joint_entropy;
+
+    MutualInfoResult {
+        mi,
+        entropy_x,
+        entropy_y,
+        joint_entropy,
+        num_bins: bins,
+    }
+}
+
+/// Mutual information with permutation testing.
+///
+/// Computes the MI and then runs `n_permutations` shuffles of `y` to build
+/// a null distribution.  Returns the MI as a z-score relative to the null.
+#[must_use]
+pub fn mutual_information_z(
+    x: &[f64],
+    y: &[f64],
+    num_bins: usize,
+    n_permutations: usize,
+    seed: u64,
+) -> f64 {
+    let observed = mutual_information(x, y, num_bins).mi;
+    if n_permutations == 0 {
+        return observed;
+    }
+
+    let n = y.len();
+    let mut y_shuffled = y.to_vec();
+    let mut perm_mi = Vec::with_capacity(n_permutations);
+
+    // Simple LCG PRNG for reproducible shuffling
+    let mut rng_state = seed;
+    let lcg_next = |state: &mut u64| -> u64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state
+    };
+
+    for _ in 0..n_permutations {
+        // Fisher-Yates shuffle
+        for i in (1..n).rev() {
+            let j = (lcg_next(&mut rng_state) as usize) % (i + 1);
+            y_shuffled.swap(i, j);
+        }
+        perm_mi.push(mutual_information(x, &y_shuffled, num_bins).mi);
+    }
+
+    let perm_mean = perm_mi.iter().sum::<f64>() / perm_mi.len() as f64;
+    let perm_var = perm_mi
+        .iter()
+        .map(|&v| (v - perm_mean) * (v - perm_mean))
+        .sum::<f64>()
+        / perm_mi.len() as f64;
+    let perm_std = perm_var.sqrt();
+
+    if perm_std.abs() < 1e-30 {
+        return 0.0;
+    }
+    (observed - perm_mean) / perm_std
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1492,5 +1671,339 @@ mod tests {
         // 10.0 is way above null → p should be 0
         assert!(result.p_value < 0.01);
         assert!(result.z_score > 3.0);
+    }
+
+    // ─── Median & Rank Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn median_odd() {
+        assert!((median(&[3.0, 1.0, 2.0]) - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn median_even() {
+        assert!((median(&[4.0, 1.0, 3.0, 2.0]) - 2.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn median_empty() {
+        assert!((median(&[]) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rank_transform_no_ties() {
+        let r = rank_transform(&[10.0, 30.0, 20.0]);
+        assert!((r[0] - 1.0).abs() < 1e-10);
+        assert!((r[1] - 3.0).abs() < 1e-10);
+        assert!((r[2] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rank_transform_with_ties() {
+        let r = rank_transform(&[1.0, 2.0, 2.0, 4.0]);
+        assert!((r[0] - 1.0).abs() < 1e-10);
+        assert!((r[1] - 2.5).abs() < 1e-10); // average rank
+        assert!((r[2] - 2.5).abs() < 1e-10);
+        assert!((r[3] - 4.0).abs() < 1e-10);
+    }
+
+    // ─── MAD & Modified Z-score Tests ────────────────────────────────────────
+
+    #[test]
+    fn mad_symmetric() {
+        // MAD of {1,2,3,4,5}: median=3, deviations={2,1,0,1,2}, MAD=1
+        assert!((mad(&[1.0, 2.0, 3.0, 4.0, 5.0]) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn modified_z_score_center_is_zero() {
+        let mz = modified_z_score(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        // Median element (3.0) should have mz = 0
+        assert!(mz[2].abs() < 1e-10);
+    }
+
+    // ─── Z-score & Normalization Tests ───────────────────────────────────────
+
+    #[test]
+    fn z_score_zero_mean_unit_var() {
+        let data = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        let z = z_score(&data, 0);
+        let m: f64 = z.iter().sum::<f64>() / z.len() as f64;
+        let v: f64 = z.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / z.len() as f64;
+        assert!(m.abs() < 1e-10);
+        assert!((v - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn min_max_scale_bounds() {
+        let data = vec![1.0, 5.0, 3.0];
+        let scaled = min_max_scale(&data, 0.0, 1.0);
+        assert!((scaled[0] - 0.0).abs() < 1e-10); // min maps to 0
+        assert!((scaled[1] - 1.0).abs() < 1e-10); // max maps to 1
+        assert!((scaled[2] - 0.5).abs() < 1e-10); // middle maps to 0.5
+    }
+
+    #[test]
+    fn min_max_scale_custom_range() {
+        let data = vec![0.0, 10.0];
+        let scaled = min_max_scale(&data, -1.0, 1.0);
+        assert!((scaled[0] - (-1.0)).abs() < 1e-10);
+        assert!((scaled[1] - 1.0).abs() < 1e-10);
+    }
+
+    // ─── Fisher-Z Tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fisher_z_roundtrip() {
+        let r = 0.7;
+        let z = fisher_z(r);
+        let r_back = fisher_z_inv(z);
+        assert!((r - r_back).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fisher_z_zero() {
+        assert!(fisher_z(0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fisher_z_vec_values() {
+        let rs = vec![0.0, 0.5, -0.5];
+        let zs = fisher_z_vec(&rs);
+        assert!(zs[0].abs() < 1e-10);
+        assert!((zs[1] - (-zs[2])).abs() < 1e-10); // antisymmetric
+    }
+
+    // ─── Entropy Tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn shannon_entropy_uniform() {
+        // Uniform over 8 outcomes: H = log2(8) = 3
+        let p = vec![0.125; 8];
+        assert!((shannon_entropy(&p) - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn shannon_entropy_certain() {
+        // One certain outcome: H = 0
+        let p = vec![1.0, 0.0, 0.0];
+        assert!(shannon_entropy(&p).abs() < 1e-10);
+    }
+
+    #[test]
+    fn signal_entropy_positive() {
+        let data: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
+        let h = signal_entropy(&data, 10);
+        assert!(h > 0.0);
+    }
+
+    // ─── Correlation Tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn pearson_perfect_positive() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        assert!((pearson_correlation(&x, &y) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pearson_perfect_negative() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![10.0, 8.0, 6.0, 4.0, 2.0];
+        assert!((pearson_correlation(&x, &y) - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn spearman_monotonic() {
+        // Spearman should be 1.0 for any monotonically increasing relationship
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![1.0, 8.0, 27.0, 64.0, 125.0]; // y = x³
+        assert!((spearman_correlation(&x, &y) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn kendall_concordant() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((kendall_correlation(&x, &y) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let x = vec![1.0, 2.0, 3.0];
+        assert!((cosine_similarity(&x, &x) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal() {
+        let x = vec![1.0, 0.0];
+        let y = vec![0.0, 1.0];
+        assert!(cosine_similarity(&x, &y).abs() < 1e-10);
+    }
+
+    #[test]
+    fn correlation_matrix_diagonal_ones() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0,
+            5.0, 6.0, 7.0, 8.0,
+            9.0, 10.0, 11.0, 12.0,
+        ];
+        let corr = correlation_matrix(&data, 3, 4);
+        assert!((corr[0] - 1.0).abs() < 1e-10); // [0,0]
+        assert!((corr[4] - 1.0).abs() < 1e-10); // [1,1]
+        assert!((corr[8] - 1.0).abs() < 1e-10); // [2,2]
+        // Symmetric
+        assert!((corr[1] - corr[3]).abs() < 1e-10); // [0,1] == [1,0]
+    }
+
+    // ─── d-prime Tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn d_prime_equal_rates() {
+        // When hit_rate == false_alarm_rate, d' = 0
+        assert!(d_prime(0.5, 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn d_prime_good_detection() {
+        // High hit rate, low FA → positive d'
+        let dp = d_prime(0.9, 0.1);
+        assert!(dp > 2.0);
+    }
+
+    #[test]
+    fn d_prime_clamped_extremes() {
+        // Rates of 0 and 1 should not panic
+        let dp = d_prime(1.0, 0.0);
+        assert!(dp > 0.0);
+    }
+
+    // ─── Bootstrap CI Tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn bootstrap_ci_contains_mean() {
+        let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let result = bootstrap_ci_mean(&data, 95.0, 1000, 12345);
+        let m = mean(&data);
+        assert!((result.statistic - m).abs() < 1e-10);
+        assert!(result.ci_lower <= m);
+        assert!(result.ci_upper >= m);
+    }
+
+    #[test]
+    fn bootstrap_ci_narrow_with_constant() {
+        let data = vec![5.0; 50];
+        let result = bootstrap_ci_mean(&data, 95.0, 500, 42);
+        assert!((result.ci_lower - 5.0).abs() < 1e-10);
+        assert!((result.ci_upper - 5.0).abs() < 1e-10);
+    }
+
+    // ─── T-test Tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn t_test_one_sample_zero_mean() {
+        // Data centered at 0 → not significant
+        let data = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let result = t_test_one_sample(&data, 0.0);
+        assert!(result.t_statistic.abs() < 1e-10);
+        assert!((result.df - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_test_one_sample_shifted() {
+        // Data far from 0 → should have large |t|
+        let data = vec![100.0, 101.0, 102.0, 103.0, 104.0];
+        let result = t_test_one_sample(&data, 0.0);
+        assert!(result.t_statistic > 10.0);
+        assert!(result.p_value < 0.01);
+    }
+
+    #[test]
+    fn t_test_two_sample_same() {
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = t_test_two_sample(&a, &b);
+        assert!(result.t_statistic.abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_test_two_sample_different() {
+        let a = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
+        let b = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = t_test_two_sample(&a, &b);
+        assert!(result.t_statistic > 3.0);
+        assert!(result.p_value < 0.05);
+    }
+
+    // ─── Dispersion Measures Tests ───────────────────────────────────────────
+
+    #[test]
+    fn cv_positive_data() {
+        let data = vec![10.0, 10.0, 10.0];
+        assert!(coefficient_of_variation(&data).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cv_varying_data() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let cv = coefficient_of_variation(&data);
+        // std/mean for {1..5}: std = sqrt(2), mean = 3 → ~0.4714
+        assert!(cv > 0.0 && cv < 1.0);
+    }
+
+    #[test]
+    fn fano_factor_poisson_like() {
+        // For Poisson: variance ≈ mean, so F ≈ 1
+        // Constant data: variance = 0, so F = 0
+        let data = vec![5.0, 5.0, 5.0];
+        assert!(fano_factor(&data).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fano_factor_positive() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!(fano_factor(&data) > 0.0);
+    }
+
+    // ─── Mutual information tests ────────────────────────────────────────────
+
+    #[test]
+    fn mutual_information_identical_signals() {
+        // MI of a signal with itself should be equal to its entropy
+        let x: Vec<f64> = (0..200).map(|i| (i % 10) as f64).collect();
+        let result = mutual_information(&x, &x, 10);
+        assert!(result.mi > 0.0);
+        // MI(X;X) = H(X), so mi ≈ entropy_x
+        assert!((result.mi - result.entropy_x).abs() < 0.5);
+    }
+
+    #[test]
+    fn mutual_information_independent_signals() {
+        // Two unrelated signals should have lower MI than correlated ones
+        let x: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.1).sin()).collect();
+        let y: Vec<f64> = (0..1000).map(|i| ((i as f64 + 137.0) * 0.37).cos()).collect();
+        let result_indep = mutual_information(&x, &y, 20);
+        // Compare with perfectly correlated
+        let y_corr: Vec<f64> = x.iter().map(|&v| v * 2.0 + 1.0).collect();
+        let result_corr = mutual_information(&x, &y_corr, 20);
+        assert!(result_indep.mi < result_corr.mi);
+    }
+
+    #[test]
+    fn mutual_information_auto_bins() {
+        let x: Vec<f64> = (0..300).map(|i| i as f64 / 30.0).collect();
+        let y: Vec<f64> = x.iter().map(|&v| v * 2.0 + 1.0).collect();
+        let result = mutual_information(&x, &y, 0); // auto bins
+        assert!(result.mi > 0.0);
+        assert!(result.num_bins >= 2);
+    }
+
+    #[test]
+    fn mutual_information_z_correlated_high() {
+        // Highly correlated → z-score should be large
+        let x: Vec<f64> = (0..200).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|&v| v * 3.0 + 5.0).collect();
+        let z = mutual_information_z(&x, &y, 15, 100, 42);
+        assert!(z > 2.0); // significantly above null
     }
 }

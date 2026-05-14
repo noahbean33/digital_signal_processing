@@ -1,0 +1,434 @@
+import { useState, useRef, useEffect } from "react";
+
+const SYSTEM_PROMPT = `You are an expert in digital signal processing and embedded Rust systems programming. You translate MATLAB or Python (scipy/numpy) DSP code into idiomatic, production-quality embedded Rust.
+
+TARGET ENVIRONMENT:
+- Bare-metal microcontrollers (Cortex-M, RISC-V, etc.)
+- no_std (no heap unless heapless is explicitly appropriate)
+- float32 preferred over float64 unless precision is critical
+- Stack allocation via const generics or fixed-size arrays
+- No panics in hot paths (use saturating arithmetic)
+
+RUST CRATES TO PREFER:
+- micromath: fast approx trig/sqrt for soft-float targets
+- libm: IEEE-compliant math when accuracy required
+- fixed: fixed-point arithmetic (use when float is unavailable)
+- heapless: stack-allocated Vec/Queue (e.g. for ring buffers)
+- cmsis-dsp: ARM CMSIS-DSP FFT/filter bindings (note when applicable)
+- nalgebra (no_std + libm features): matrix ops
+- num-complex: complex numbers
+- cordic: CORDIC trig for fixed-point
+
+TRANSLATION RULES:
+1. IIR filters (scipy.signal.iirfilter, butter, cheby, etc.) → Direct Form II transposed biquad cascade; output the SOS coefficients as const f32 arrays
+2. FIR filters (scipy.signal.firwin, lfilter with FIR) → const f32 coefficient arrays + sliding window or block convolution
+3. FFT (numpy.fft) → note CMSIS-DSP arm_rfft_fast_f32 for Cortex-M4/M7, or microfft crate; output the Rust call pattern
+4. numpy array ops → stack arrays or heapless::Vec with explicit size
+5. scipy.signal.lfilter / sosfilt → stateful filter struct with tick() method
+6. Resampling → polyphase FIR comment with crate suggestion
+7. Signal generation (sin, chirp, etc.) → micromath::F32Ext or CORDIC
+
+OUTPUT FORMAT:
+- First: brief explanation of translation strategy and any architectural decisions
+- Then: complete Rust code (no_std compatible)
+- Then: Cargo.toml [dependencies] snippet with exact crate names
+- Flag any MATLAB/scipy operations that have no direct embedded equivalent, and propose the closest embedded-appropriate substitute
+- Add inline comments where the embedded implementation diverges from the reference
+
+Be terse in explanation. Let the code speak. Do not add boilerplate disclaimers.`;
+
+const EXAMPLES = [
+  {
+    label: "Butterworth LPF",
+    lang: "scipy",
+    code: `from scipy.signal import butter, sosfilt, sosfilt_zi
+import numpy as np
+
+sos = butter(4, 1000, btype='low', fs=48000, output='sos')
+zi = sosfilt_zi(sos)
+
+def process_block(block):
+    global zi
+    out, zi = sosfilt(sos, block, zi=zi)
+    return out`,
+  },
+  {
+    label: "FIR + FFT",
+    lang: "scipy",
+    code: `from scipy.signal import firwin
+import numpy as np
+
+taps = firwin(63, 0.3)  # normalized cutoff
+
+def process(x):
+    filtered = np.convolve(x, taps, mode='same')
+    spectrum = np.fft.rfft(filtered, n=256)
+    mag = np.abs(spectrum)
+    return mag`,
+  },
+  {
+    label: "Biquad IIR",
+    lang: "matlab",
+    code: `[b, a] = butter(2, 0.2);  % 2nd order, normalized cutoff
+
+% State
+z = zeros(1, 2);
+
+function [y, z] = biquad_tick(b, a, x, z)
+    w = x - a(2)*z(1) - a(3)*z(2);
+    y = b(1)*w + b(2)*z(1) + b(3)*z(2);
+    z = [w, z(1)];
+end`,
+  },
+];
+
+export default function DSPTranslator() {
+  const [lang, setLang] = useState("scipy");
+  const [code, setCode] = useState(EXAMPLES[0].code);
+  const [output, setOutput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [dots, setDots] = useState("");
+  const outputRef = useRef(null);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    if (loading) {
+      intervalRef.current = setInterval(() => {
+        setDots(d => d.length >= 3 ? "" : d + ".");
+      }, 400);
+    } else {
+      clearInterval(intervalRef.current);
+      setDots("");
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [loading]);
+
+  useEffect(() => {
+    if (output && outputRef.current) {
+      outputRef.current.scrollTop = 0;
+    }
+  }, [output]);
+
+  async function translate() {
+    if (!code.trim()) return;
+    setLoading(true);
+    setOutput("");
+
+    const userMsg = `Translate this ${lang === "matlab" ? "MATLAB" : "Python/scipy"} DSP code to embedded Rust:\n\n\`\`\`${lang === "matlab" ? "matlab" : "python"}\n${code}\n\`\`\``;
+
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: userMsg }],
+        }),
+      });
+      const data = await resp.json();
+      const text = data.content?.map(b => b.text || "").join("") || "Error: no response";
+      setOutput(text);
+    } catch (e) {
+      setOutput(`// Error: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function loadExample(ex) {
+    setLang(ex.lang);
+    setCode(ex.code);
+    setOutput("");
+  }
+
+  // Syntax highlight Rust output - very simple token coloring
+  function colorizeOutput(text) {
+    if (!text) return null;
+    const lines = text.split("\n");
+    return lines.map((line, i) => {
+      // Detect code blocks vs prose
+      const isCodeLine = /^\s*(\/\/|pub|fn|use|let|const|impl|struct|#\[|mod|extern|->|=>|match|for|if|while|return|[a-z_]+::|[0-9])/.test(line)
+        || /\.(push|tick|iter|map|len|new|collect)\(/.test(line);
+
+      let colored = line
+        .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+      if (isCodeLine) {
+        // keywords
+        colored = colored.replace(
+          /\b(fn|let|const|mut|pub|use|struct|impl|for|in|if|else|match|return|true|false|self|Self|super|crate|mod|extern|type|where|as|ref|move|dyn|trait|unsafe|async|await|loop|break|continue|while|enum|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|usize|isize|bool|str|String)\b/g,
+          '<span style="color:#7dd3fc">$1</span>'
+        );
+        // strings
+        colored = colored.replace(
+          /"([^"]*)"/g,
+          '<span style="color:#86efac">"$1"</span>'
+        );
+        // numbers
+        colored = colored.replace(
+          /\b(\d+\.?\d*(?:f32|f64|u8|usize)?)\b/g,
+          '<span style="color:#fbbf24">$1</span>'
+        );
+        // comments
+        colored = colored.replace(
+          /(\/\/.*$)/,
+          '<span style="color:#6b7280;font-style:italic">$1</span>'
+        );
+        // attributes
+        colored = colored.replace(
+          /(#\[[^\]]+\])/g,
+          '<span style="color:#c084fc">$1</span>'
+        );
+        return (
+          <div key={i} style={{ color: "#e2e8f0" }} dangerouslySetInnerHTML={{ __html: colored }} />
+        );
+      }
+
+      // Prose / markdown-ish lines
+      let display = line;
+      // bold **
+      display = display.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      // backtick inline
+      display = display.replace(/`([^`]+)`/g, '<code style="color:#34d399;background:#0f2d1f;padding:0 3px;border-radius:3px">$1</code>');
+
+      const isHeading = /^#+\s/.test(line) || /^---/.test(line);
+      const isCargo = /^\[dependencies\]|^[a-z_-]+ =/.test(line.trim());
+
+      return (
+        <div
+          key={i}
+          style={{
+            color: isHeading ? "#4ade80" : isCargo ? "#fbbf24" : "#94a3b8",
+            fontWeight: isHeading ? 700 : 400,
+            marginTop: isHeading ? "12px" : 0,
+          }}
+          dangerouslySetInnerHTML={{ __html: display }}
+        />
+      );
+    });
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#030a03",
+      color: "#4ade80",
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+      padding: "24px",
+      boxSizing: "border-box",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      {/* CRT scanline overlay */}
+      <div style={{
+        position: "fixed", inset: 0, pointerEvents: "none", zIndex: 10,
+        background: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px)",
+      }} />
+      {/* Phosphor glow vignette */}
+      <div style={{
+        position: "fixed", inset: 0, pointerEvents: "none", zIndex: 9,
+        background: "radial-gradient(ellipse at center, transparent 50%, rgba(0,20,0,0.7) 100%)",
+      }} />
+
+      <div style={{ position: "relative", zIndex: 1, maxWidth: 900, margin: "0 auto" }}>
+        {/* Header */}
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: 11, color: "#166534", letterSpacing: 4, marginBottom: 6 }}>
+            SIGNAL PROCESSING TRANSPILER v0.1.0
+          </div>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 700,
+            color: "#4ade80",
+            textShadow: "0 0 20px rgba(74,222,128,0.6)",
+            letterSpacing: 1,
+          }}>
+            scipy → <span style={{ color: "#f97316" }}>Rust</span> DSP
+          </h1>
+          <div style={{ fontSize: 11, color: "#166534", marginTop: 4 }}>
+            embedded · no_std · bare-metal
+          </div>
+        </div>
+
+        {/* Lang toggle + examples */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ display: "flex", border: "1px solid #166534", borderRadius: 4, overflow: "hidden" }}>
+            {["scipy", "matlab"].map(l => (
+              <button
+                key={l}
+                onClick={() => setLang(l)}
+                style={{
+                  padding: "5px 16px",
+                  background: lang === l ? "#166534" : "transparent",
+                  color: lang === l ? "#4ade80" : "#166534",
+                  border: "none",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  fontSize: 12,
+                  letterSpacing: 1,
+                  transition: "all 0.15s",
+                }}
+              >
+                {l.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "#166534", alignSelf: "center" }}>EXAMPLES:</span>
+            {EXAMPLES.map(ex => (
+              <button
+                key={ex.label}
+                onClick={() => loadExample(ex)}
+                style={{
+                  padding: "4px 10px",
+                  background: "transparent",
+                  border: "1px solid #166534",
+                  color: "#4ade80",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  letterSpacing: 0.5,
+                  transition: "all 0.15s",
+                }}
+                onMouseEnter={e => e.target.style.background = "#0d2d0d"}
+                onMouseLeave={e => e.target.style.background = "transparent"}
+              >
+                {ex.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Main layout */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          {/* Input */}
+          <div>
+            <div style={{
+              fontSize: 10, color: "#166534", letterSpacing: 3, marginBottom: 8,
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <span>◈ INPUT</span>
+              <span style={{ opacity: 0.6 }}>// {lang === "matlab" ? "MATLAB" : "python/scipy"}</span>
+            </div>
+            <textarea
+              value={code}
+              onChange={e => setCode(e.target.value)}
+              spellCheck={false}
+              style={{
+                width: "100%",
+                height: 340,
+                background: "#050f05",
+                border: "1px solid #166534",
+                borderRadius: 4,
+                color: "#86efac",
+                fontFamily: "inherit",
+                fontSize: 13,
+                padding: "14px",
+                resize: "vertical",
+                boxSizing: "border-box",
+                outline: "none",
+                lineHeight: 1.6,
+                caretColor: "#4ade80",
+              }}
+            />
+          </div>
+
+          {/* Output */}
+          <div>
+            <div style={{
+              fontSize: 10, color: "#c2410c", letterSpacing: 3, marginBottom: 8,
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <span style={{ color: "#f97316" }}>◈ OUTPUT</span>
+              <span style={{ color: "#7c2d12", opacity: 0.8 }}>// rust / embedded</span>
+              {loading && <span style={{ color: "#4ade80", animation: "pulse 1s infinite" }}>{dots}</span>}
+            </div>
+            <div
+              ref={outputRef}
+              style={{
+                width: "100%",
+                height: 340,
+                background: "#050a07",
+                border: "1px solid #7c2d12",
+                borderRadius: 4,
+                padding: "14px",
+                boxSizing: "border-box",
+                overflow: "auto",
+                fontSize: 12,
+                lineHeight: 1.65,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {loading ? (
+                <div style={{ color: "#166534" }}>
+                  <div>// translating{dots}</div>
+                  <div style={{ marginTop: 8, opacity: 0.5 }}>// mapping coefficients to const arrays</div>
+                  <div style={{ marginTop: 4, opacity: 0.4 }}>// resolving no_std constraints</div>
+                </div>
+              ) : output ? (
+                colorizeOutput(output)
+              ) : (
+                <div style={{ color: "#166534", opacity: 0.5 }}>
+                  // output will appear here<br/><br/>
+                  // targets:<br/>
+                  //   cortex-m4 · cortex-m7 · rp2040<br/>
+                  //   esp32 (xtensa) · risc-v (ch32)<br/><br/>
+                  // crates used as needed:<br/>
+                  //   micromath · libm · heapless<br/>
+                  //   fixed · cmsis-dsp · microfft
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Translate button */}
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
+          <button
+            onClick={translate}
+            disabled={loading || !code.trim()}
+            style={{
+              padding: "10px 48px",
+              background: loading ? "#0d2d0d" : "#166534",
+              border: `1px solid ${loading ? "#166534" : "#4ade80"}`,
+              color: loading ? "#4ade80" : "#030a03",
+              fontFamily: "inherit",
+              fontSize: 13,
+              letterSpacing: 3,
+              fontWeight: 700,
+              cursor: loading ? "not-allowed" : "pointer",
+              borderRadius: 3,
+              transition: "all 0.2s",
+              textShadow: loading ? "none" : "0 0 10px rgba(74,222,128,0.4)",
+              boxShadow: loading ? "none" : "0 0 20px rgba(74,222,128,0.15)",
+            }}
+          >
+            {loading ? `COMPILING${dots}` : "▶  TRANSLATE"}
+          </button>
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          marginTop: 28, textAlign: "center", fontSize: 10,
+          color: "#166534", letterSpacing: 2, opacity: 0.6,
+        }}>
+          SCIPY → RUST · NO_STD · BARE METAL DSP
+        </div>
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #030a03; }
+        ::-webkit-scrollbar-thumb { background: #166534; border-radius: 3px; }
+        textarea:focus { border-color: #4ade80 !important; box-shadow: 0 0 0 1px #4ade8040; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+      `}</style>
+    </div>
+  );
+}

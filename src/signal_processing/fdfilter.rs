@@ -293,6 +293,128 @@ pub fn gaussian_bandpass(signal: &[f64], sample_rate: f64, center_freq: f64, fwh
     gaussian_frequency_filter(signal, sample_rate, center_freq, fwhm).filtered
 }
 
+// ─── Planck Taper Bandpass Filter ─────────────────────────────────────────────
+
+/// Narrow-band filter using a Planck-taper spectral window.
+///
+/// The Planck taper provides a smooth, flat-top bandpass shape with tuneable
+/// edge roll-off controlled by the `eta` parameter (0 < eta < 0.5).
+///
+/// * `signal` – input time-domain signal.
+/// * `sample_rate` – sampling rate in Hz.
+/// * `center_freq` – peak frequency of the bandpass (Hz).
+/// * `fwhm` – full-width at half-maximum of the passband (Hz).
+/// * `eta` – edge decay parameter (0 < eta < 0.5). Smaller = sharper edges.
+///
+/// Returns the filtered signal (same length as input).
+#[must_use]
+pub fn planck_taper_bandpass(
+    signal: &[f64],
+    sample_rate: f64,
+    center_freq: f64,
+    fwhm: f64,
+    eta: f64,
+) -> Vec<f64> {
+    let n = signal.len();
+    if n == 0 || sample_rate <= 0.0 || fwhm <= 0.0 {
+        return signal.to_vec();
+    }
+
+    // Number of frequency bins spanning the FWHM
+    let np_bins = ((2.0 * fwhm * n as f64 / sample_rate).round() as usize).max(2);
+
+    // Build Planck taper of length np_bins
+    let np_f = np_bins as f64;
+    let eta_clamped = eta.max(0.01).min(0.49);
+    let mut taper = vec![0.0; np_bins];
+
+    let bound_left = ((eta_clamped * (np_f - 1.0)).floor() as usize).max(1);
+    let bound_right = (((1.0 - eta_clamped) * (np_f - 1.0)).ceil() as usize).min(np_bins - 2);
+
+    for i in 0..np_bins {
+        let pt = i as f64;
+        if i == 0 {
+            taper[i] = 0.0;
+        } else if i < bound_left {
+            let zl = eta_clamped * (np_f - 1.0) * (1.0 / pt + 1.0 / (pt - eta_clamped * (np_f - 1.0)));
+            taper[i] = 1.0 / (zl.exp() + 1.0);
+        } else if i <= bound_right {
+            taper[i] = 1.0;
+        } else if i < np_bins - 1 {
+            let zr = eta_clamped * (np_f - 1.0)
+                * (1.0 / (np_f - 1.0 - pt) + 1.0 / ((1.0 - eta_clamped) * (np_f - 1.0) - pt));
+            taper[i] = 1.0 / (zr.exp() + 1.0);
+        } else {
+            taper[i] = 0.0;
+        }
+    }
+
+    // Frequency vector
+    let hz: Vec<f64> = (0..n).map(|i| sample_rate * i as f64 / n as f64).collect();
+
+    // Find centre frequency index
+    let fidx = hz
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            ((*a - center_freq).abs())
+                .partial_cmp(&((*b - center_freq).abs()))
+                .unwrap()
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    // Place taper into a full-length frequency-domain window
+    let half_np = np_bins / 2;
+    let mut px = vec![0.0; n];
+    for (k, &v) in taper.iter().enumerate() {
+        let idx = fidx as isize - half_np as isize + k as isize;
+        if idx >= 0 && (idx as usize) < n {
+            px[idx as usize] = v;
+        }
+    }
+
+    // Pad to power of 2 for FFT
+    let mut fft_size = 1;
+    while fft_size < n {
+        fft_size <<= 1;
+    }
+
+    // FFT of signal
+    let mut signal_fft: Vec<Complex> = signal
+        .iter()
+        .map(|&v| Complex::new(v, 0.0))
+        .chain(std::iter::repeat(Complex::zero()).take(fft_size - n))
+        .collect();
+    fft(&mut signal_fft);
+
+    // Build padded filter (mirror for negative frequencies)
+    let px_padded: Vec<f64> = (0..fft_size)
+        .map(|i| {
+            if i < n {
+                px[i]
+            } else {
+                let mirror = fft_size - i;
+                if mirror < n { px[mirror] } else { 0.0 }
+            }
+        })
+        .collect();
+
+    // Apply filter
+    for i in 0..fft_size {
+        signal_fft[i] = Complex::new(
+            signal_fft[i].re * px_padded[i],
+            signal_fft[i].im * px_padded[i],
+        );
+    }
+
+    // IFFT
+    ifft(&mut signal_fft);
+
+    // Return real part, doubled to compensate for one-sided filtering
+    signal_fft[..n].iter().map(|c| 2.0 * c.re).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +530,40 @@ mod tests {
     fn gaussian_filter_empty_input() {
         let result = gaussian_frequency_filter(&[], 1000.0, 50.0, 5.0);
         assert!(result.filtered.is_empty());
+    }
+
+    // ─── Planck taper bandpass tests ─────────────────────────────────────────
+
+    #[test]
+    fn planck_taper_bandpass_correct_length() {
+        let signal = vec![1.0; 512];
+        let filtered = planck_taper_bandpass(&signal, 1000.0, 50.0, 10.0, 0.15);
+        assert_eq!(filtered.len(), 512);
+    }
+
+    #[test]
+    fn planck_taper_bandpass_passes_target() {
+        use std::f64::consts::PI;
+        let sr = 1000.0;
+        let n = 1024;
+        // Signal: 20 Hz sine + 200 Hz sine
+        let signal: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (2.0 * PI * 20.0 * t).sin() + (2.0 * PI * 200.0 * t).sin()
+            })
+            .collect();
+
+        let filtered = planck_taper_bandpass(&signal, sr, 20.0, 6.0, 0.15);
+        assert_eq!(filtered.len(), n);
+        // Filtered signal should have energy (20 Hz component survives)
+        let power: f64 = filtered.iter().map(|x| x * x).sum::<f64>() / n as f64;
+        assert!(power > 0.01);
+    }
+
+    #[test]
+    fn planck_taper_bandpass_empty() {
+        let filtered = planck_taper_bandpass(&[], 1000.0, 50.0, 10.0, 0.15);
+        assert!(filtered.is_empty());
     }
 }
